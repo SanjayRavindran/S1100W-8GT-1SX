@@ -1,0 +1,27 @@
+# Strictly ignore all binary images and firmware builds
+*.bin
+*.bin.*
+*.hex
+*.ihx
+*.img
+firmware/
+dist/
+build/
+output/
+RTLPlayground/
+
+# Scratch and hardware debug captures
+*.log
+scratch/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# System & Editor files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
