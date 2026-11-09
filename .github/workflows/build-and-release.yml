@@ -1,0 +1,170 @@
+name: RTLPlayground Upstream Release Builder
+
+on:
+  schedule:
+    # Check upstream releases every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      target_tag:
+        description: 'Specific RTLPlayground release tag or branch to build (leave blank to auto-detect latest release)'
+        required: false
+        default: ''
+      force_build:
+        description: 'Force rebuild and publish even if release already exists'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-build:
+    name: Check & Build Open-Source Firmware
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Check Upstream RTLPlayground Release Availability
+        id: check
+        run: |
+          MANUAL_TAG="${{ github.event.inputs.target_tag }}"
+          FORCE_BUILD="${{ github.event.inputs.force_build }}"
+
+          if [ -n "$MANUAL_TAG" ]; then
+            TARGET_TAG="$MANUAL_TAG"
+            echo "Using manual target tag: $TARGET_TAG"
+          else
+            echo "Querying latest release from logicog/RTLPlayground..."
+            TARGET_TAG=$(curl -sSL -H "User-Agent: CI" https://api.github.com/repos/logicog/RTLPlayground/releases/latest | jq -r '.tag_name // empty')
+            if [ -z "$TARGET_TAG" ]; then
+              echo "No formal release found; falling back to latest upstream git tag..."
+              TARGET_TAG=$(curl -sSL -H "User-Agent: CI" https://api.github.com/repos/logicog/RTLPlayground/tags | jq -r '.[0].name // empty')
+            fi
+            if [ -z "$TARGET_TAG" ]; then
+              TARGET_TAG="main"
+              echo "No tags found; defaulting to main branch."
+            fi
+          fi
+
+          echo "Target upstream tag: $TARGET_TAG"
+          echo "target_tag=$TARGET_TAG" >> $GITHUB_OUTPUT
+
+          # Check if this release already exists in our repository
+          echo "Checking if release '$TARGET_TAG' already exists in ${{ github.repository }}..."
+          EXISTING_RELEASE=$(curl -sSL -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "User-Agent: CI" \
+            https://api.github.com/repos/${{ github.repository }}/releases/tags/${TARGET_TAG} | jq -r '.tag_name // empty')
+
+          if [ "$EXISTING_RELEASE" = "$TARGET_TAG" ] && [ "$FORCE_BUILD" != "true" ]; then
+            echo "Release '$TARGET_TAG' is already published in this repo. Skipping build."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "Proceeding with firmware compilation for release '$TARGET_TAG'!"
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Build Dependencies
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libboost-dev \
+            libboost-graph-dev \
+            libjson-c-dev \
+            zlib1g-dev \
+            bison \
+            flex \
+            python3 \
+            curl \
+            jq
+
+      - name: Clone Upstream RTLPlayground
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          TARGET="${{ steps.check.outputs.target_tag }}"
+          echo "Cloning logicog/RTLPlayground at target: $TARGET"
+          git clone --depth 1 --branch "$TARGET" https://github.com/logicog/RTLPlayground.git RTLPlayground || \
+          (git clone --depth 1 https://github.com/logicog/RTLPlayground.git RTLPlayground && cd RTLPlayground && git checkout "$TARGET")
+          cd RTLPlayground
+          echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Build Patched SDCC Toolchain
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cd RTLPlayground
+          make toolchain -j$(nproc)
+
+      - name: Configure Board Profile
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cat << 'EOF' > RTLPlayground/config_s1100w.txt
+          hostname S1100W
+          passwd admin
+          ip 192.168.1.28
+          netmask 255.255.255.0
+          gw 192.168.1.1
+          ip dhcp
+          EOF
+
+      - name: Compile S1100W Firmware
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cd RTLPlayground
+          make BOARD=HASIVO_S1100WP_8GT_1SX_SE CONFIG=config_s1100w.txt -j$(nproc)
+
+      - name: Build Updatebuilder & Package OEM Image
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cd RTLPlayground/installer
+          make -j$(nproc)
+          cd ../..
+          mkdir -p dist
+          TAG="${{ steps.check.outputs.target_tag }}"
+          ./RTLPlayground/installer/updatebuilder \
+            HASIVO_S1100WP_8GT_1SX_SE \
+            RTLPlayground/output/rtlplayground.bin \
+            dist/S1100W-OPENSOURCE-${TAG}-OEM-UPGRADE.bin
+
+      - name: Verify Realtek Checksums
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          TAG="${{ steps.check.outputs.target_tag }}"
+          python3 tools/calcsum.py dist/S1100W-OPENSOURCE-${TAG}-OEM-UPGRADE.bin
+
+      - name: Generate Checksum Signatures
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cd dist
+          TAG="${{ steps.check.outputs.target_tag }}"
+          sha256sum "S1100W-OPENSOURCE-${TAG}-OEM-UPGRADE.bin" > "S1100W-OPENSOURCE-${TAG}-OEM-UPGRADE.bin.sha256"
+          cat "S1100W-OPENSOURCE-${TAG}-OEM-UPGRADE.bin.sha256"
+
+      - name: Publish to GitHub Releases
+        if: steps.check.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.check.outputs.target_tag }}
+          name: S1100W-8GT-1SX Open-Source Firmware (${{ steps.check.outputs.target_tag }})
+          draft: false
+          prerelease: false
+          body: |
+            ## Automated Build: Hasivo S1100W-8GT-1SX Open-Source Firmware
+            Built automatically from upstream [logicog/RTLPlayground](https://github.com/logicog/RTLPlayground) release `${{ steps.check.outputs.target_tag }}` (commit `${{ env.COMMIT_HASH }}`).
+
+            ### Specifications
+            * **Hardware:** Hasivo S1100W-8GT-1SX (8x 2.5GbE RJ45 + 1x 10GbE SFP+, non-PoE)
+            * **Switching Core:** Realtek RTL8373 / RTL8372 (`Ver8373_72: C`)
+            * **Architecture:** MCS-51 8051 Large Banked Model (compiled via SDCC 4.6.0)
+            * **Network Profile:** Dynamic DHCP Client with Option 12 (`hostname S1100W`), fallback `192.168.1.28/24`
+            * **Default Password:** `admin` (Web & 115200 baud Serial CLI)
+
+            ### Installation
+            1. Open switch Web UI $\rightarrow$ **Tools $\rightarrow$ Firmware Upgrade** (`/fwug.cgi`).
+            2. Select `S1100W-OPENSOURCE-${{ steps.check.outputs.target_tag }}-OEM-UPGRADE.bin` and click **Upgrade**.
+            3. Or flash via the emergency bootloader (`http://192.168.1.1/httpupg.cgi?cmd=fw_upgrade`).
+          files: dist/*
