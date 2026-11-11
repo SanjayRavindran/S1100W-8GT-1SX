@@ -1,17 +1,32 @@
 name: RTLPlayground Upstream Release Builder
 
 on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/**'
+      - 'tools/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/**'
+      - 'tools/**'
   schedule:
     # Check upstream releases every 6 hours
     - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
-      target_tag:
-        description: 'Specific RTLPlayground release tag or branch to build (leave blank to auto-detect latest release)'
+      target_ref:
+        description: 'RTLPlayground release tag or branch (blank = latest compatible release, or "main")'
         required: false
         default: ''
+      publish_release:
+        description: 'Publish GitHub Release with compiled binaries'
+        required: false
+        type: boolean
+        default: false
       force_build:
-        description: 'Force rebuild and publish even if release already exists'
+        description: 'Rebuild even if a release for the tag already exists'
         required: false
         type: boolean
         default: false
@@ -19,88 +34,148 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: rtlplayground-build-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  check-and-build:
-    name: Check & Build Open-Source Firmware
+  check:
+    name: Check Upstream Release
     runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.upstream.outputs.should_build }}
+      target_ref: ${{ steps.upstream.outputs.target_ref }}
+      publish_release: ${{ steps.upstream.outputs.publish_release }}
+      release_tag: ${{ steps.upstream.outputs.release_tag }}
+      force_build: ${{ steps.upstream.outputs.force_build }}
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Check Upstream RTLPlayground Release Availability
-        id: check
+        id: upstream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          MANUAL_TAG="${{ github.event.inputs.target_tag }}"
-          FORCE_BUILD="${{ github.event.inputs.force_build }}"
+          python3 tools/check_upstream_release.py \
+            --event "${{ github.event_name }}" \
+            --target-ref "${{ github.event.inputs.target_ref }}" \
+            --publish-release "${{ github.event.inputs.publish_release }}" \
+            --force-build "${{ github.event.inputs.force_build }}" \
+            --repo "${{ github.repository }}"
 
-          if [ -n "$MANUAL_TAG" ]; then
-            TARGET_TAG="$MANUAL_TAG"
-            echo "Using manual target tag: $TARGET_TAG"
-          else
-            echo "Querying latest release from logicog/RTLPlayground..."
-            TARGET_TAG=$(curl -sSL -H "User-Agent: CI" https://api.github.com/repos/logicog/RTLPlayground/releases/latest | jq -r '.tag_name // empty')
-            if [ -z "$TARGET_TAG" ]; then
-              echo "No formal release found; falling back to latest upstream git tag..."
-              TARGET_TAG=$(curl -sSL -H "User-Agent: CI" https://api.github.com/repos/logicog/RTLPlayground/tags | jq -r '.[0].name // empty')
-            fi
-            if [ -z "$TARGET_TAG" ]; then
-              TARGET_TAG="main"
-              echo "No tags found; defaulting to main branch."
-            fi
-          fi
+  build:
+    name: Build & Verify Firmware
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
 
-          echo "Target upstream tag: $TARGET_TAG"
-          echo "target_tag=$TARGET_TAG" >> $GITHUB_OUTPUT
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-          # Check if this release already exists in our repository
-          echo "Checking if release '$TARGET_TAG' already exists in ${{ github.repository }}..."
-          EXISTING_RELEASE=$(curl -sSL -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "User-Agent: CI" \
-            https://api.github.com/repos/${{ github.repository }}/releases/tags/${TARGET_TAG} | jq -r '.tag_name // empty')
-
-          if [ "$EXISTING_RELEASE" = "$TARGET_TAG" ] && [ "$FORCE_BUILD" != "true" ]; then
-            echo "Release '$TARGET_TAG' is already published in this repo. Skipping build."
-            echo "skip=true" >> $GITHUB_OUTPUT
-          else
-            echo "Proceeding with firmware compilation for release '$TARGET_TAG'!"
-            echo "skip=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Install Build Dependencies
-        if: steps.check.outputs.skip != 'true'
+      - name: Install Build & Packaging Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            libboost-dev \
-            libboost-graph-dev \
-            libjson-c-dev \
-            zlib1g-dev \
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            git \
+            curl \
+            make \
+            gcc \
+            g++ \
+            binutils \
             bison \
             flex \
+            libboost-dev \
+            libboost-graph-dev \
+            patch \
+            bzip2 \
+            xz-utils \
+            zstd \
+            xxd \
             python3 \
-            curl \
+            python-is-python3 \
+            libjson-c-dev \
+            zlib1g-dev \
             jq
+          rm -rf /var/lib/apt/lists/*
+          git config --global --add safe.directory '*'
 
       - name: Clone Upstream RTLPlayground
-        if: steps.check.outputs.skip != 'true'
         run: |
-          TARGET="${{ steps.check.outputs.target_tag }}"
-          echo "Cloning logicog/RTLPlayground at target: $TARGET"
-          git clone --depth 1 --branch "$TARGET" https://github.com/logicog/RTLPlayground.git RTLPlayground || \
-          (git clone --depth 1 https://github.com/logicog/RTLPlayground.git RTLPlayground && cd RTLPlayground && git checkout "$TARGET")
-          cd RTLPlayground
-          echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          TARGET_REF="${{ needs.check.outputs.target_ref }}"
+          echo "Cloning logicog/RTLPlayground at ref: ${TARGET_REF}"
+          if git clone --filter=blob:none --branch "${TARGET_REF}" https://github.com/logicog/RTLPlayground.git RTLPlayground 2>/dev/null; then
+            echo "Checked out branch/tag ${TARGET_REF}"
+          else
+            git clone --filter=blob:none https://github.com/logicog/RTLPlayground.git RTLPlayground
+            git -C RTLPlayground checkout "${TARGET_REF}"
+          fi
 
-      - name: Build Patched SDCC Toolchain
-        if: steps.check.outputs.skip != 'true'
+          cd RTLPlayground
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          FW_VERSION=$(grep -E '^VERSION=' Makefile | head -n1 | cut -d= -f2 | tr -d '[:space:]')
+          RELEASE_TAG="${{ needs.check.outputs.release_tag }}"
+          if [ -z "${RELEASE_TAG}" ]; then
+            RELEASE_TAG="v${FW_VERSION}-${COMMIT_HASH}"
+          fi
+
+          echo "COMMIT_HASH=${COMMIT_HASH}" >> "$GITHUB_ENV"
+          echo "FW_VERSION=${FW_VERSION}" >> "$GITHUB_ENV"
+          echo "EFFECTIVE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
+          echo "Upstream commit: ${COMMIT_HASH} | Makefile VERSION: ${FW_VERSION} | Effective tag: ${RELEASE_TAG}"
+
+      - name: Verify Target Release Status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SKIP_PUBLISH="false"
+          if [ "${{ needs.check.outputs.publish_release }}" = "true" ] && [ "${{ needs.check.outputs.force_build }}" != "true" ]; then
+            HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/${EFFECTIVE_TAG}")
+            if [ "${HTTP_CODE}" = "200" ]; then
+              echo "Release ${EFFECTIVE_TAG} already exists; skipping release publication."
+              SKIP_PUBLISH="true"
+            fi
+          fi
+          echo "SKIP_PUBLISH=${SKIP_PUBLISH}" >> "$GITHUB_ENV"
+
+      - name: Cache Patched SDCC Toolchain
+        uses: actions/cache@v4
+        with:
+          path: RTLPlayground/toolchain
+          key: sdcc-trixie-${{ hashFiles('RTLPlayground/sdcc/*') }}
+
+      - name: Ensure Patched SDCC Toolchain
         run: |
           cd RTLPlayground
-          make toolchain -j$(nproc)
+          SDCC_DIR="toolchain/sdcc-$(cat sdcc/* | cksum | cut -d' ' -f1)"
+          if [ ! -x "${SDCC_DIR}/bin/sdcc" ]; then
+            echo "Building patched SDCC toolchain at ${SDCC_DIR}..."
+            for attempt in 1 2 3; do
+              if sh sdcc/build.sh "$(pwd)/${SDCC_DIR}"; then
+                break
+              fi
+              echo "SDCC build attempt ${attempt} failed; cleaning up before retry..."
+              rm -rf "${SDCC_DIR}"
+              if [ "${attempt}" -eq 3 ]; then
+                echo "SDCC toolchain build failed after 3 attempts."
+                exit 1
+              fi
+              sleep 10
+            done
+          else
+            echo "Restored cached SDCC toolchain at ${SDCC_DIR}"
+          fi
+          "${SDCC_DIR}/bin/sdcc" --version
 
-      - name: Configure Board Profile
-        if: steps.check.outputs.skip != 'true'
+      - name: Configure S1100W Board Profile
         run: |
           cat << 'EOF' > RTLPlayground/config_s1100w.txt
           hostname S1100W
@@ -111,60 +186,76 @@ jobs:
           ip dhcp
           EOF
 
-      - name: Compile S1100W Firmware
-        if: steps.check.outputs.skip != 'true'
+      - name: Compile S1100W Firmware & OEM Installer
         run: |
           cd RTLPlayground
-          make BOARD=HASIVO_S1100WP_8GT_1SX_SE CONFIG=config_s1100w.txt -j$(nproc)
+          make CI=1 MACHINE=HASIVO_S1100WP_8GT_1SX_SE CONFIG=config_s1100w.txt
+          make -C installer
 
-      - name: Build Updatebuilder & Package OEM Image
-        if: steps.check.outputs.skip != 'true'
+      - name: Package & Verify Checksums
         run: |
-          cd RTLPlayground/installer
-          make -j$(nproc)
-          cd ../..
           mkdir -p dist
-          TAG="${{ steps.check.outputs.target_tag }}"
-          ./RTLPlayground/installer/updatebuilder \
-            HASIVO_S1100WP_8GT_1SX_SE \
-            RTLPlayground/output/rtlplayground.bin \
-            dist/S1100W-OPENSOURCE-${TAG}-OEM-UPGRADE.bin
+          OEM_BIN="dist/S1100W-OPENSOURCE-${EFFECTIVE_TAG}-OEM-UPGRADE.bin"
+          FULL_BIN="dist/S1100W-OPENSOURCE-${EFFECTIVE_TAG}-FULL-FLASH.bin"
 
-      - name: Verify Realtek Checksums
-        if: steps.check.outputs.skip != 'true'
-        run: |
-          TAG="${{ steps.check.outputs.target_tag }}"
-          python3 tools/calcsum.py dist/S1100W-OPENSOURCE-${TAG}-OEM-UPGRADE.bin
+          cp -L RTLPlayground/installer/output/rtlplayground_oem_upgrade.bin "${OEM_BIN}"
+          cp -L RTLPlayground/output/rtlplayground.bin "${FULL_BIN}"
+          chmod 0644 "${OEM_BIN}" "${FULL_BIN}"
 
-      - name: Generate Checksum Signatures
-        if: steps.check.outputs.skip != 'true'
-        run: |
-          cd dist
-          TAG="${{ steps.check.outputs.target_tag }}"
-          sha256sum "S1100W-OPENSOURCE-${TAG}-OEM-UPGRADE.bin" > "S1100W-OPENSOURCE-${TAG}-OEM-UPGRADE.bin.sha256"
-          cat "S1100W-OPENSOURCE-${TAG}-OEM-UPGRADE.bin.sha256"
+          echo "=== Realtek Container Checksum Verification (OEM Upgrade) ==="
+          python3 tools/calcsum.py "${OEM_BIN}"
+
+          echo "=== CRC-16 Verification (Full 512KB Flash Image) ==="
+          ./RTLPlayground/tools/output/HASIVO_S1100WP_8GT_1SX_SE/crc_calculator -v "${FULL_BIN}"
+
+          (cd dist && sha256sum *.bin > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+          {
+            echo "### Build Summary (\`HASIVO_S1100WP_8GT_1SX_SE\`)"
+            echo "- Upstream ref: \`${{ needs.check.outputs.target_ref }}\` (\`${COMMIT_HASH}\`, Makefile \`v${FW_VERSION}\`)"
+            echo "- Effective tag: \`${EFFECTIVE_TAG}\`"
+            echo "- OEM Upgrade image: \`$(basename "${OEM_BIN}")\` ($(wc -c < "${OEM_BIN}") bytes)"
+            echo "- Full Flash image: \`$(basename "${FULL_BIN}")\` ($(wc -c < "${FULL_BIN}") bytes)"
+            echo ""
+            echo "#### SHA-256 Checksums"
+            echo '```text'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+            echo "#### Memory Layout (\`rtlplayground.mem\`)"
+            echo '```text'
+            cat RTLPlayground/output/HASIVO_S1100WP_8GT_1SX_SE/rtlplayground.mem
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: S1100W-OPENSOURCE-${{ env.EFFECTIVE_TAG }}
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error
 
       - name: Publish to GitHub Releases
-        if: steps.check.outputs.skip != 'true'
+        if: needs.check.outputs.publish_release == 'true' && env.SKIP_PUBLISH != 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.check.outputs.target_tag }}
-          name: S1100W-8GT-1SX Open-Source Firmware (${{ steps.check.outputs.target_tag }})
+          tag_name: ${{ env.EFFECTIVE_TAG }}
+          name: S1100W-8GT-1SX Open-Source Firmware (${{ env.EFFECTIVE_TAG }})
           draft: false
           prerelease: false
           body: |
             ## Automated Build: Hasivo S1100W-8GT-1SX Open-Source Firmware
-            Built automatically from upstream [logicog/RTLPlayground](https://github.com/logicog/RTLPlayground) release `${{ steps.check.outputs.target_tag }}` (commit `${{ env.COMMIT_HASH }}`).
+            Built from [logicog/RTLPlayground](https://github.com/logicog/RTLPlayground) (`${{ needs.check.outputs.target_ref }}`, commit `${{ env.COMMIT_HASH }}`, version `${{ env.FW_VERSION }}`).
 
-            ### Specifications
-            * **Hardware:** Hasivo S1100W-8GT-1SX (8x 2.5GbE RJ45 + 1x 10GbE SFP+, non-PoE)
-            * **Switching Core:** Realtek RTL8373 / RTL8372 (`Ver8373_72: C`)
-            * **Architecture:** MCS-51 8051 Large Banked Model (compiled via SDCC 4.6.0)
-            * **Network Profile:** Dynamic DHCP Client with Option 12 (`hostname S1100W`), fallback `192.168.1.28/24`
-            * **Default Password:** `admin` (Web & 115200 baud Serial CLI)
+            ### Hardware & Configuration Profile
+            * **Hardware Target:** Hasivo S1100W-8GT-1SX (`HASIVO_S1100WP_8GT_1SX_SE`, 8x 2.5GbE RJ45 + 1x 10GbE SFP+, non-PoE)
+            * **Switching Core:** Realtek RTL8373 / RTL8372
+            * **Architecture:** MCS-51 8051 Large Banked Model (compiled via patched SDCC 4.6.0)
+            * **Network Profile:** Dynamic DHCP Client with Option 12 (`hostname S1100W`), static fallback `192.168.1.28/24`, gateway `192.168.1.1`
+            * **Default Password:** `admin` (Web Console & 115200 baud Serial CLI)
 
-            ### Installation
-            1. Open switch Web UI $\rightarrow$ **Tools $\rightarrow$ Firmware Upgrade** (`/fwug.cgi`).
-            2. Select `S1100W-OPENSOURCE-${{ steps.check.outputs.target_tag }}-OEM-UPGRADE.bin` and click **Upgrade**.
-            3. Or flash via the emergency bootloader (`http://192.168.1.1/httpupg.cgi?cmd=fw_upgrade`).
+            ### Artifacts & Installation
+            * **`S1100W-OPENSOURCE-${{ env.EFFECTIVE_TAG }}-OEM-UPGRADE.bin`**: Flashable via vendor Web UI (`/fwug.cgi`) or failsafe bootloader (`http://192.168.1.1/httpupg.cgi?cmd=fw_upgrade`). Verified with `tools/calcsum.py`.
+            * **`S1100W-OPENSOURCE-${{ env.EFFECTIVE_TAG }}-FULL-FLASH.bin`**: Raw 512 KB SPI NOR flash image for external SOIC-8 flashers. Verified with `crc_calculator -v`.
           files: dist/*

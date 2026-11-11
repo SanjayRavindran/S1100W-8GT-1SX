@@ -92,6 +92,7 @@ def main() -> None:
 
     with args.firmware as f, mmap(f.fileno(), 0) as mm:
         binary = FirmwareType.UNKNOWN
+        primary_header: Header | None = None
 
         buffer = mm.read(2)
 
@@ -102,11 +103,11 @@ def main() -> None:
                 buffer += mm.read(HEADER_LENGTH - 2)
 
                 try:
-                    header = Header.from_bytes(buffer)
+                    primary_header = Header.from_bytes(buffer)
                 except Exception as e:
                     exit(e)
 
-                binary = FirmwareType.UPDATE if (header.length + HEADER_LENGTH) == mm.size() else FirmwareType.UNKNOWN
+                binary = FirmwareType.UPDATE if (primary_header.length + HEADER_LENGTH) == mm.size() else FirmwareType.UNKNOWN
 
         if binary is FirmwareType.UNKNOWN:
             exit('Invalid binary')
@@ -135,6 +136,12 @@ def main() -> None:
         payload_sum += 0xff * HEADER_LENGTH
 
         payload_sum += sum(mm.read(PAYLOAD_BLOCK_3_LENGTH(header.length)))
+
+        if header.dirty:
+            print_or_exit('Incorrect header sum')
+
+        if primary_header is not None and bytes(primary_header) != bytes(header):
+            print_or_exit('Mismatched primary and secondary headers')
 
         if header.payload_sum != payload_sum:
             print_or_exit('Incorrect payload sum')

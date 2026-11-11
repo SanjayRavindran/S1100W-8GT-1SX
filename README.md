@@ -103,10 +103,10 @@ Comprehensive technical references detailing the inner workings of the original 
 This repository includes a continuous integration build pipeline located at [`.github/workflows/build-and-release.yml`](.github/workflows/build-and-release.yml).
 
 ### How It Works:
-1. **Upstream Release Tracking:** Runs automatically every 6 hours to query the GitHub API for new releases in [logicog/RTLPlayground](https://github.com/logicog/RTLPlayground).
-2. **Hermetic Cross-Compilation:** Provisions an Ubuntu build environment, compiles the patched SDCC 4.6.0 compiler (`make toolchain`), and builds the firmware for board definition `HASIVO_S1100WP_8GT_1SX_SE`.
-3. **Packaging & Checksum Verification:** Uses `updatebuilder` to wrap the firmware into the Realtek 20-byte container format and validates integrity using [`tools/calcsum.py`](tools/calcsum.py).
-4. **Automated GitHub Releases:** When a new upstream release is detected (or triggered via manual workflow dispatch), it publishes a new release under the [Releases](../../releases) tab with the downloadable upgrade binary and `.sha256` checksums attached.
+1. **Upstream Release Tracking:** Runs every 6 hours via [`tools/check_upstream_release.py`](tools/check_upstream_release.py), checking the [logicog/RTLPlayground](https://github.com/logicog/RTLPlayground) `releases.atom` feed and verifying board compatibility (`machine/HASIVO_S1100WP_8GT_1SX_SE.h` and `installer/Makefile`). Legacy releases predating S1100W support (such as `v0_1_alpha`) are skipped cleanly.
+2. **Hermetic Cross-Compilation (`debian:trixie`):** Provisions an isolated Debian Trixie build container matching upstream CI, compiles and caches the patched SDCC 4.6.0 toolchain (`sdcc/build.sh` with retry support), and compiles `MACHINE=HASIVO_S1100WP_8GT_1SX_SE` with `--Werror` (`CI=1`).
+3. **Packaging & Dual Checksum Verification:** Builds `make -C installer` cleanly to package the Realtek OEM upgrade container, validates it with [`tools/calcsum.py`](tools/calcsum.py), and validates the raw 512 KB SPI image with `crc_calculator -v`.
+4. **Automated GitHub Releases:** When a new compatible upstream release is detected (or triggered manually via `workflow_dispatch`), it publishes a GitHub Release under [Releases](../../releases) with both `OEM-UPGRADE.bin` and `FULL-FLASH.bin` plus `SHA256SUMS.txt` attached—keeping the git tree free of binaries.
 
 ---
 
@@ -162,14 +162,13 @@ python tools/calcsum.py <firmware_image.bin>
 python tools/calcsum.py -u <firmware_image.bin>
 ```
 
-Expected output for valid images:
+Expected output for a valid image (exits `0`; exits non-zero on invalid magic, length, payload sum, header sum, or header mismatch):
 ```text
-magic:       12345678
-length:      00084026
-header sum:  000003d6
+magic: 12345678
+length: 00084012
+header sum: 000003d6
 payload sum: 020c04ad
-reserved:    332255ff
-Status:      Chksum Correct! (0 errors)
+reserved: 332255ff
 ```
 
 ---
@@ -189,7 +188,8 @@ S1100W-8GT-1SX/
 │   ├── FIRMWARE_SPECIFICATION.md              # Complete 33-CGI module & NVRAM struct specification
 │   └── OPENSOURCE_FIRMWARE_GUIDE.md           # Exhaustive open-source user & CLI reference guide
 └── tools/
-    └── calcsum.py                             # Realtek container checksum verification tool
+    ├── calcsum.py                             # Realtek container checksum verification tool
+    └── check_upstream_release.py              # Upstream RTLPlayground release compatibility checker
 ```
 
 ---

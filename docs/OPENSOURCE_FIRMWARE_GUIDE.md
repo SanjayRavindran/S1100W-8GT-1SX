@@ -196,20 +196,19 @@ The firmware writes the compressed binary configuration record into SPI NOR flas
 
 ## Building from Source
 
-To compile the open-source firmware from source on Ubuntu / Debian:
+To compile the open-source firmware from source on Debian Trixie / Ubuntu:
 
 ```bash
 # 1. Install prerequisites
-sudo apt install -y build-essential libboost-dev libboost-graph-dev libjson-c-dev zlib1g-dev bison flex
+sudo apt-get update
+sudo apt-get install -y build-essential libboost-dev libboost-graph-dev libjson-c-dev \
+  zlib1g-dev bison flex patch bzip2 xxd python3 python-is-python3 curl ca-certificates git
 
 # 2. Clone repository
 git clone https://github.com/logicog/RTLPlayground.git
 cd RTLPlayground
 
-# 3. Compile patched SDCC cross-compiler
-make toolchain
-
-# 4. Configure tailored board profile
+# 3. Configure tailored board profile
 cat << 'EOF' > config_s1100w.txt
 hostname S1100W
 passwd admin
@@ -219,13 +218,12 @@ gw 192.168.1.1
 ip dhcp
 EOF
 
-# 5. Compile firmware binary
-make BOARD=HASIVO_S1100WP_8GT_1SX_SE CONFIG=config_s1100w.txt
+# 4. Compile patched SDCC toolchain (automatically invoked on first build) & firmware binary
+make CI=1 MACHINE=HASIVO_S1100WP_8GT_1SX_SE CONFIG=config_s1100w.txt
 
-# 6. Generate OEM-upgradeable container image
-cd installer
-make
-./updatebuilder HASIVO_S1100WP_8GT_1SX_SE ../output/rtlplayground.bin output/rtlplayground_oem_upgrade.bin
+# 5. Build installer & package OEM-upgradeable container image
+#    Outputs: installer/output/rtlplayground_oem_upgrade.bin & output/rtlplayground.bin
+make -C installer
 ```
 
 ---
@@ -237,9 +235,9 @@ The switch's hardware write-protected bootloader provides emergency unbrick reco
 1. Connect the serial console (`115200` or `57600` baud).
 2. Power on the switch while holding `ESC`.
 3. The bootloader starts an emergency HTTP recovery server on `192.168.1.1`.
-4. Connect an Ethernet cable from your PC to Port 1, configure your PC to `192.168.1.2/24`, and upload:
+4. Connect an Ethernet cable from your PC to Port 1, configure your PC to `192.168.1.2/24`, and upload an OEM upgrade image downloaded from [Releases](../../releases):
    ```bash
-   curl -F "file=@firmware/S1100W-OPENSOURCE-v0.1.0-OEM-UPGRADE.bin" "http://192.168.1.1/httpupg.cgi?cmd=fw_upgrade"
+   curl -F "file=@S1100W-OPENSOURCE-<tag>-OEM-UPGRADE.bin" "http://192.168.1.1/httpupg.cgi?cmd=fw_upgrade"
    ```
 5. The switch will verify the container, flash the kernel, and reboot automatically.
 
