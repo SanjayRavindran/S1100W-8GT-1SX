@@ -202,7 +202,7 @@ To compile the open-source firmware from source on Debian Trixie / Ubuntu:
 # 1. Install prerequisites
 sudo apt-get update
 sudo apt-get install -y build-essential libboost-dev libboost-graph-dev libjson-c-dev \
-  zlib1g-dev bison flex patch bzip2 xxd python3 python-is-python3 curl ca-certificates git
+  zlib1g-dev pkg-config bison flex patch bzip2 xxd python3 python-is-python3 curl ca-certificates git
 
 # 2. Clone repository
 git clone https://github.com/logicog/RTLPlayground.git

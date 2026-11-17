@@ -103,6 +103,7 @@ jobs:
             python-is-python3 \
             libjson-c-dev \
             zlib1g-dev \
+            pkg-config \
             jq
           rm -rf /var/lib/apt/lists/*
           git config --global --add safe.directory '*'
