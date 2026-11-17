@@ -84,6 +84,8 @@ Comprehensive technical references detailing the inner workings of the original 
    * **Dumb Switch Mode Mechanics:** How the RTL8372 ASIC forwards packets in hardware without CPU intervention when management ACL traps (`trap2cpu`) are disabled.
    * **Factory Engineering Suite:** OEM branding and calibration submenus at `/Hasivo_mp_cfg` (`ftdft.cgi`, `ftlogo.cgi`, `ftcolor.cgi`).
    * **20-Byte Container Format:** Mathematical formulation of the 32-bit inverted accumulator checksum.
+3. **[`docs/PROJECT_JOURNAL_AND_CONTEXT.md`](docs/PROJECT_JOURNAL_AND_CONTEXT.md):**
+   * **End-to-End Engineering Context & Lessons Learned:** Confirmed non-PoE hardware pins, UART baud-rate change (`57600` $\rightarrow$ `115200`), RTLPlayground build/packaging pitfalls (`MACHINE=`, single-threaded `installer/`, `pkg-config`), CI/CD architecture, and workstation handoff notes.
 
 ---
 
@@ -188,7 +190,8 @@ S1100W-8GT-1SX/
 ├── docs/
 │   ├── ORIGINAL_FIRMWARE_ANALYSIS.md          # Hardware architecture, dumb mode & container format
 │   ├── FIRMWARE_SPECIFICATION.md              # Complete 33-CGI module & NVRAM struct specification
-│   └── OPENSOURCE_FIRMWARE_GUIDE.md           # Exhaustive open-source user & CLI reference guide
+│   ├── OPENSOURCE_FIRMWARE_GUIDE.md           # Exhaustive open-source user & CLI reference guide
+│   └── PROJECT_JOURNAL_AND_CONTEXT.md         # Engineering journal, lessons learned & handoff context
 └── tools/
     ├── calcsum.py                             # Realtek container checksum verification tool
     └── check_upstream_release.py              # Upstream RTLPlayground release compatibility checker
