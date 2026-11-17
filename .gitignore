@@ -4,6 +4,7 @@
 *.hex
 *.ihx
 *.img
+backups/
 firmware/
 dist/
 build/

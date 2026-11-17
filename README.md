@@ -183,6 +183,8 @@ S1100W-8GT-1SX/
 ├── .github/
 │   └── workflows/
 │       └── build-and-release.yml              # Automated upstream CI/CD release workflow
+├── config/
+│   └── s1100w.txt                             # Non-PoE board startup config (DHCP + fallback IP)
 ├── docs/
 │   ├── ORIGINAL_FIRMWARE_ANALYSIS.md          # Hardware architecture, dumb mode & container format
 │   ├── FIRMWARE_SPECIFICATION.md              # Complete 33-CGI module & NVRAM struct specification
