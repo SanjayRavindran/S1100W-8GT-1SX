@@ -81,24 +81,29 @@ Verified live on the switch (`v0.1.0-948c828`, later superseded in GitHub Releas
 ## 5. CI/CD Pipeline Architecture & Release Policy
 
 - **Git Tree Policy:** Zero `.bin` or firmware build blobs are tracked in git; compiled images live exclusively in [GitHub Releases](../../releases) and workflow artifacts.
-- **Upstream Release Check ([`tools/check_upstream_release.py`](../tools/check_upstream_release.py)):**
-  - `logicog/RTLPlayground`'s only tagged release (`v0_1_alpha`, Nov 2025) is marked prerelease (causing `/releases/latest` to return 404) and predates both `HASIVO_S1100WP_8GT_1SX_SE` and `installer/`.
-  - To prevent unauthenticated `api.github.com` 60 req/hr rate-limit failures and legacy-tag crashes, scheduled runs fetch `https://github.com/logicog/RTLPlayground/releases.atom` and verify `machine/HASIVO_S1100WP_8GT_1SX_SE.h` + `installer/Makefile` via `raw.githubusercontent.com` `HEAD` requests.
-  - Scheduled runs skip gracefully (`should_build=false`, exit `0`) until upstream tags a compatible release, and skip releases already published in this repository.
-- **Manual Snapshot Releases & Toolchain Caching:**
-  - `workflow_dispatch` supports building `target_ref: main` (or any compatible tag/SHA) with `publish_release: true` to publish `v<VERSION>-<short_sha>` releases (e.g., `v0.1.0-3762ee1`).
-  - `actions/cache@v4` caches `RTLPlayground/toolchain` keyed by `sdcc-trixie-${{ hashFiles('RTLPlayground/sdcc/*') }}`, cutting build runtime from `~3m29s` (cold) to `~1m37s`–`2m13s` (cached).
-  - `sh sdcc/build.sh` is wrapped in a 3-attempt retry loop to survive transient SourceForge download failures.
+- **Weekly `main`-Branch Tracking ([`tools/check_upstream_release.py`](../tools/check_upstream_release.py)):**
+  - Because `logicog/RTLPlayground` rarely publishes GitHub releases (its legacy `v0_1_alpha` tag predates `HASIVO_S1100WP_8GT_1SX_SE` and `installer/`), the pipeline tracks upstream `main` on a weekly schedule (Sundays at `02:00 UTC`, `cron: '0 2 * * 0'`).
+  - `check_upstream_release.py` authenticates with `GITHUB_TOKEN`, resolves the exact `main` (or manual `target_ref`) commit SHA via the GitHub REST API, verifies `machine/HASIVO_S1100WP_8GT_1SX_SE.h` and `installer/Makefile` exist at that commit, extracts `VERSION` from upstream `Makefile`, and forms `v<VERSION>-<short_sha>`.
+  - Scheduled runs skip cleanly (`should_build=false`, exit `0`) if `v<VERSION>-<short_sha>` is already published (no new commits on `main`), avoiding redundant weekly builds.
+- **Pinned Builds, Release Notes & Toolchain Caching:**
+  - `jobs.build` clones `logicog/RTLPlayground` (`--filter=blob:none`, preserving full commit history for changelog generation) and checks out the exact pinned `commit_sha`.
+  - `workflow_dispatch` defaults `target_ref` to `main` (supporting any branch, tag, or commit SHA) alongside `publish_release` and `force_build` inputs.
+  - `actions/cache@v4` caches `RTLPlayground/toolchain` keyed by `sdcc-trixie-${{ hashFiles('RTLPlayground/sdcc/*') }}`, cutting build runtime from `~3m29s` (cold) to `~1m37s`–`2m13s` (cached), with a 3-attempt retry loop around `sh sdcc/build.sh`.
+  - [`tools/generate_release_notes.py`](../tools/generate_release_notes.py) queries the latest prior release, computes the first-parent commit diff (`prev_sha..curr_sha`), categorizes merged PRs/commits (`S1100W-Specific Changes`, `Firmware, Networking & Web UI`, `Other Board & Hardware Support`, `Documentation, Tests & Build Tooling`), and writes `release_notes.md` at the workspace root (outside `dist/`, so `softprops/action-gh-release@v2` passes it via `body_path:` without attaching it as an asset).
+- **Actions History Hygiene:** Old failed, skipped, and non-releasing `push`/`workflow_dispatch` workflow runs are periodically pruned so the Actions history reflects release-producing builds cleanly.
 
 ---
 
-## 6. Local Workspace & Decommissioned Host Handoff
+## 6. Local Workspace & Host Handoff
 
 - **Repository Contents (Tracked in Git):**
   - [`config/s1100w.txt`](../config/s1100w.txt) — Startup board config (`hostname S1100W`, `ip dhcp`, fallback `192.168.1.28/24`, gw `192.168.1.1`, password `admin`).
-  - [`.github/workflows/build-and-release.yml`](../.github/workflows/build-and-release.yml) — Automated upstream tracker, `debian:trixie` builder, dual verifier, and GitHub Release publisher.
-  - [`tools/calcsum.py`](../tools/calcsum.py) & [`tools/check_upstream_release.py`](../tools/check_upstream_release.py) — Verification and upstream release checking scripts.
+  - [`.github/workflows/build-and-release.yml`](../.github/workflows/build-and-release.yml) — Weekly upstream `main` builder, `debian:trixie` compiler, dual verifier, release notes generator, and GitHub Release publisher.
+  - [`tools/calcsum.py`](../tools/calcsum.py), [`tools/check_upstream_release.py`](../tools/check_upstream_release.py), & [`tools/generate_release_notes.py`](../tools/generate_release_notes.py) — Container checksum verifier, upstream commit/compatibility checker, and automated release-notes generator.
   - `docs/` — [`ORIGINAL_FIRMWARE_ANALYSIS.md`](ORIGINAL_FIRMWARE_ANALYSIS.md), [`FIRMWARE_SPECIFICATION.md`](FIRMWARE_SPECIFICATION.md), [`OPENSOURCE_FIRMWARE_GUIDE.md`](OPENSOURCE_FIRMWARE_GUIDE.md), and this journal.
 - **Local-Only Gitignored Files (Preserved on Windows Workstation):**
   - Stock & patched reference images (`S1100W-8GT-1SX-SEV1.9*.bin`), NVRAM dump (`config_backup.bin`), UART captures (`*.log`, `*.bin`), and the initially flashed `948c828` build pair under `backups/`.
-- **Host Independence:** All builds and future releases run autonomously on GitHub Actions without requiring a dedicated Linux build host; local development on Windows only needs Python 3 for `tools/*.py` and `pyserial` (`COM4`) for UART console access.
+- **Git / GitHub Operations via Linux Host (`192.168.1.15`):**
+  - The Windows workstation does not have `git` or `gh` installed locally. Git commits, pushes, and `gh` CLI operations are performed over SSH on `192.168.1.15` (`zero@192.168.1.15`, clone path `~/S1100W-8GT-1SX`, repo-local `user.name`/`user.email` set to `Sanjay Ravindran <mail2snjyrvndrn@gmail.com>`).
+  - Never copy local `.bin`, `.log`, or `backups/` files into `~/S1100W-8GT-1SX`.
+- **CI Independence:** All firmware builds and weekly releases run autonomously on GitHub Actions without requiring a dedicated build host; local Windows only needs Python 3 for `tools/*.py` and `pyserial` (`COM4`) for UART console access.

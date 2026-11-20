@@ -8,7 +8,7 @@
 Exhaustive hardware documentation, reverse-engineering specifications, original firmware architecture, and an automated CI/CD build pipeline for the **Hasivo / Realtek S1100W-8GT-1SX** (8x 2.5GbE RJ45 + 1x 10GbE SFP+) managed network switch.
 
 > [!NOTE]
-> **No Binary Policy:** This repository does not store or distribute pre-compiled binary firmware images in the git tree. All firmware binaries are generated automatically from upstream [logicog/RTLPlayground](https://github.com/logicog/RTLPlayground) releases via the [GitHub Actions CI/CD Pipeline](#automated-cicd-build-pipeline) and published as downloadable assets under [GitHub Releases](../../releases).
+> **No Binary Policy:** This repository does not store or distribute pre-compiled binary firmware images in the git tree. All firmware binaries are built weekly from upstream [logicog/RTLPlayground](https://github.com/logicog/RTLPlayground) (`main` branch) via the [GitHub Actions CI/CD Pipeline](#automated-cicd-build-pipeline) and published with categorized release notes under [GitHub Releases](../../releases).
 
 ---
 
@@ -105,10 +105,10 @@ Comprehensive technical references detailing the inner workings of the original 
 This repository includes a continuous integration build pipeline located at [`.github/workflows/build-and-release.yml`](.github/workflows/build-and-release.yml).
 
 ### How It Works:
-1. **Upstream Release Tracking:** Runs every 6 hours via [`tools/check_upstream_release.py`](tools/check_upstream_release.py), checking the [logicog/RTLPlayground](https://github.com/logicog/RTLPlayground) `releases.atom` feed and verifying board compatibility (`machine/HASIVO_S1100WP_8GT_1SX_SE.h` and `installer/Makefile`). Legacy releases predating S1100W support (such as `v0_1_alpha`) are skipped cleanly.
-2. **Hermetic Cross-Compilation (`debian:trixie`):** Provisions an isolated Debian Trixie build container matching upstream CI, compiles and caches the patched SDCC 4.6.0 toolchain (`sdcc/build.sh` with retry support), and compiles `MACHINE=HASIVO_S1100WP_8GT_1SX_SE` with `--Werror` (`CI=1`).
-3. **Packaging & Dual Checksum Verification:** Builds `make -C installer` cleanly to package the Realtek OEM upgrade container, validates it with [`tools/calcsum.py`](tools/calcsum.py), and validates the raw 512 KB SPI image with `crc_calculator -v`.
-4. **Automated GitHub Releases:** When a new compatible upstream release is detected (or triggered manually via `workflow_dispatch`), it publishes a GitHub Release under [Releases](../../releases) with both `OEM-UPGRADE.bin` and `FULL-FLASH.bin` plus `SHA256SUMS.txt` attached—keeping the git tree free of binaries.
+1. **Weekly Upstream `main` Tracking & Commit Pinning:** Runs weekly on Sundays at `02:00 UTC` (`cron: '0 2 * * 0'`) via [`tools/check_upstream_release.py`](tools/check_upstream_release.py). It resolves the `main` branch head commit on [logicog/RTLPlayground](https://github.com/logicog/RTLPlayground) via the GitHub API, verifies board compatibility (`machine/HASIVO_S1100WP_8GT_1SX_SE.h` and `installer/Makefile`), parses `VERSION` from the upstream `Makefile`, and skips redundant builds if `v<VERSION>-<short_sha>` is already published.
+2. **Hermetic Cross-Compilation (`debian:trixie`):** Provisions an isolated Debian Trixie build container matching upstream CI, checks out the pinned upstream commit SHA, compiles and caches the patched SDCC 4.6.0 toolchain (`sdcc/build.sh` with retry support), and compiles `MACHINE=HASIVO_S1100WP_8GT_1SX_SE` with `--Werror` (`CI=1`) using [`config/s1100w.txt`](config/s1100w.txt).
+3. **Packaging & Dual Checksum Verification:** Builds `make -C installer` single-threaded to package the Realtek OEM upgrade container, validates it with [`tools/calcsum.py`](tools/calcsum.py), validates the raw 512 KB SPI image with `crc_calculator -v`, and generates `SHA256SUMS.txt`.
+4. **Automated Release Notes & GitHub Releases:** [`tools/generate_release_notes.py`](tools/generate_release_notes.py) diffs first-parent upstream commits since the previous published release, categorizes PRs/commits (`S1100W-Specific Changes`, `Firmware, Networking & Web UI`, `Other Board & Hardware Support`, `Documentation, Tests & Build Tooling`), and embeds build metadata, SHA-256 checksums, and 8051 memory layout. Scheduled runs (and manual `workflow_dispatch` runs with `publish_release=true`) publish both `OEM-UPGRADE.bin` and `FULL-FLASH.bin` plus `SHA256SUMS.txt` under [Releases](../../releases)—keeping the git tree free of binaries. Manual `workflow_dispatch` supports `target_ref` (default `main`, or any branch/tag/SHA), `publish_release`, and `force_build`.
 
 ---
 
@@ -184,7 +184,7 @@ S1100W-8GT-1SX/
 ├── .gitignore                                 # Ignores all binaries and temporary artifacts
 ├── .github/
 │   └── workflows/
-│       └── build-and-release.yml              # Automated upstream CI/CD release workflow
+│       └── build-and-release.yml              # Weekly upstream main CI/CD build & release workflow
 ├── config/
 │   └── s1100w.txt                             # Non-PoE board startup config (DHCP + fallback IP)
 ├── docs/
@@ -194,7 +194,8 @@ S1100W-8GT-1SX/
 │   └── PROJECT_JOURNAL_AND_CONTEXT.md         # Engineering journal, lessons learned & handoff context
 └── tools/
     ├── calcsum.py                             # Realtek container checksum verification tool
-    └── check_upstream_release.py              # Upstream RTLPlayground release compatibility checker
+    ├── check_upstream_release.py              # Upstream RTLPlayground main-branch & compatibility checker
+    └── generate_release_notes.py              # Automated release-notes & categorized changelog generator
 ```
 
 ---

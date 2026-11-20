@@ -14,6 +14,7 @@ RTLPlayground/
 # Scratch and hardware debug captures
 *.log
 scratch/
+release_notes.md
 
 # Python artifacts
 __pycache__/

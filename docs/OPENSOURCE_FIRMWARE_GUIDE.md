@@ -196,6 +196,9 @@ The firmware writes the compressed binary configuration record into SPI NOR flas
 
 ## Building from Source
 
+> [!TIP]
+> Pre-compiled weekly `main`-branch binaries with per-release changelogs and SHA-256 manifests are published automatically under [Releases](../../releases).
+
 To compile the open-source firmware from source on Debian Trixie / Ubuntu:
 
 ```bash

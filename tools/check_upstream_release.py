@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
-"""Check upstream logicog/RTLPlayground release availability and compatibility."""
+"""Resolve upstream logicog/RTLPlayground main/ref state, compatibility, and release status."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
 
 
-USER_AGENT = "S1100W-8GT-1SX-CI/1.0"
-ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
+USER_AGENT = "S1100W-8GT-1SX-CI/2.0"
 REQUIRED_UPSTREAM_FILES = (
     "machine/HASIVO_S1100WP_8GT_1SX_SE.h",
     "installer/Makefile",
 )
+VERSION_RE = re.compile(r"^VERSION\s*=\s*(\S+)", re.MULTILINE)
+
+
+def github_headers(token: str = "") -> dict[str, str]:
+    """Build standard GitHub REST API headers."""
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def fetch_url(
@@ -55,12 +67,63 @@ def fetch_url(
     raise RuntimeError(f"Failed to {method} {url} after {retries} attempts: {last_err}")
 
 
-def is_ref_compatible(upstream: str, ref: str) -> tuple[bool, str]:
-    """Verify the upstream ref includes S1100W machine support and OEM installer."""
+def resolve_upstream_commit(upstream: str, ref: str, token: str) -> tuple[str, str, str]:
+    """Resolve `ref` on `upstream` to (full_sha, commit_date, first_subject_line)."""
     encoded_ref = urllib.parse.quote(ref, safe="")
+    api_url = f"https://api.github.com/repos/{upstream}/commits/{encoded_ref}"
+    status, payload = fetch_url(api_url, headers=github_headers(token))
+    if status != 200:
+        raise RuntimeError(f"Failed to resolve ref '{ref}' in {upstream} (HTTP {status}).")
+
+    data = json.loads(payload.decode("utf-8"))
+    full_sha = str(data.get("sha", "")).strip()
+    if not full_sha:
+        raise RuntimeError(f"Missing commit SHA when resolving '{ref}' in {upstream}.")
+
+    commit_info = data.get("commit", {})
+    commit_date = (
+        commit_info.get("committer", {}).get("date")
+        or commit_info.get("author", {}).get("date")
+        or ""
+    ).strip()
+    message = str(commit_info.get("message", "")).strip()
+    subject = message.splitlines()[0].strip() if message else ""
+    return full_sha, commit_date, subject
+
+
+def is_upstream_tag(upstream: str, ref: str, token: str) -> bool:
+    """Return True if `ref` resolves to a git tag in `upstream`."""
+    if ref in ("main", "master"):
+        return False
+    encoded_ref = urllib.parse.quote(ref, safe="")
+    api_url = f"https://api.github.com/repos/{upstream}/git/ref/tags/{encoded_ref}"
+    status, _ = fetch_url(api_url, headers=github_headers(token))
+    return status == 200
+
+
+def get_makefile_version(upstream: str, commit_sha: str) -> str:
+    """Fetch top-level Makefile from `upstream@commit_sha` and extract `VERSION`."""
+    encoded_sha = urllib.parse.quote(commit_sha, safe="")
+    raw_url = f"https://raw.githubusercontent.com/{upstream}/{encoded_sha}/Makefile"
+    status, payload = fetch_url(raw_url)
+    if status != 200:
+        raise RuntimeError(
+            f"Failed to fetch Makefile at {upstream}@{commit_sha[:7]} (HTTP {status})."
+        )
+    match = VERSION_RE.search(payload.decode("utf-8", errors="replace"))
+    if not match:
+        raise RuntimeError(
+            f"Could not parse VERSION from {upstream}@{commit_sha[:7]}/Makefile."
+        )
+    return match.group(1).strip()
+
+
+def is_ref_compatible(upstream: str, commit_sha: str) -> tuple[bool, str]:
+    """Verify the upstream commit includes S1100W machine support and OEM installer."""
+    encoded_sha = urllib.parse.quote(commit_sha, safe="")
     missing: list[str] = []
     for rel_path in REQUIRED_UPSTREAM_FILES:
-        raw_url = f"https://raw.githubusercontent.com/{upstream}/{encoded_ref}/{rel_path}"
+        raw_url = f"https://raw.githubusercontent.com/{upstream}/{encoded_sha}/{rel_path}"
         status, _ = fetch_url(raw_url, method="HEAD")
         if status != 200:
             missing.append(rel_path)
@@ -70,34 +133,13 @@ def is_ref_compatible(upstream: str, ref: str) -> tuple[bool, str]:
     return True, "compatible"
 
 
-def get_upstream_releases(upstream: str) -> list[tuple[str, str, str]]:
-    """Return upstream (tag, title, updated) entries from releases.atom, newest first."""
-    atom_url = f"https://github.com/{upstream}/releases.atom"
-    status, payload = fetch_url(atom_url)
-    if status != 200:
-        raise RuntimeError(f"Unexpected HTTP {status} fetching {atom_url}")
-
-    root = ET.fromstring(payload.decode("utf-8"))
-    releases: list[tuple[str, str, str]] = []
-    for entry in root.findall("atom:entry", ATOM_NS):
-        title = entry.findtext("atom:title", "", ATOM_NS).strip()
-        updated = entry.findtext("atom:updated", "", ATOM_NS).strip()
-        link = entry.find("atom:link", ATOM_NS)
-        href = link.attrib.get("href", "") if link is not None else ""
-        if "/releases/tag/" in href:
-            tag = urllib.parse.unquote(href.rstrip("/").split("/")[-1])
-            releases.append((tag, title, updated))
-    return releases
-
-
 def release_exists(repo: str, tag: str, token: str) -> bool:
     """Return True if a GitHub release for `tag` already exists in `repo`."""
+    if not repo:
+        return False
     encoded_tag = urllib.parse.quote(tag, safe="")
     api_url = f"https://api.github.com/repos/{repo}/releases/tags/{encoded_tag}"
-    headers = {"Accept": "application/vnd.github+json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    status, _ = fetch_url(api_url, headers=headers)
+    status, _ = fetch_url(api_url, headers=github_headers(token))
     return status == 200
 
 
@@ -124,6 +166,7 @@ def decide_build(
     *,
     event: str,
     target_ref: str,
+    upstream_branch: str,
     publish_release: bool,
     force_build: bool,
     repo: str,
@@ -132,112 +175,121 @@ def decide_build(
 ) -> tuple[dict[str, str], list[str]]:
     """Determine build outputs and summary lines for the triggering GitHub event."""
     if event in ("push", "pull_request"):
+        effective_ref = upstream_branch
+    elif event == "schedule":
+        effective_ref = upstream_branch
+    elif event == "workflow_dispatch":
+        effective_ref = target_ref or upstream_branch
+    else:
+        effective_ref = target_ref or upstream_branch
+
+    commit_sha, commit_date, commit_subject = resolve_upstream_commit(
+        upstream, effective_ref, token
+    )
+    short_sha = commit_sha[:7]
+
+    compatible, compat_reason = is_ref_compatible(upstream, commit_sha)
+    if not compatible:
+        raise RuntimeError(
+            f"Upstream ref '{effective_ref}' ({short_sha}) in {upstream} is incompatible ({compat_reason})."
+        )
+
+    fw_version = get_makefile_version(upstream, commit_sha)
+    if event == "workflow_dispatch" and is_upstream_tag(upstream, effective_ref, token):
+        release_tag = effective_ref
+    else:
+        release_tag = f"v{fw_version}-{short_sha}"
+
+    if event in ("push", "pull_request"):
         outputs = {
             "should_build": "true",
-            "target_ref": "main",
+            "target_ref": effective_ref,
+            "commit_sha": commit_sha,
+            "short_sha": short_sha,
+            "fw_version": fw_version,
+            "release_tag": release_tag,
             "publish_release": "false",
-            "release_tag": "",
             "force_build": "false",
         }
         return outputs, [
             "### CI Build Verification",
             f"- Trigger event: `{event}`",
-            f"- Upstream ref: `logicog/RTLPlayground@main`",
+            f"- Upstream ref: `{upstream}@{effective_ref}` (`{short_sha}`, {commit_date or 'unknown date'})",
+            f"- Head commit: {commit_subject}",
             "- Release publication: disabled (verification & artifact build only)",
         ]
 
-    if event == "workflow_dispatch" and target_ref and target_ref != "latest-release":
-        compatible, compat_reason = is_ref_compatible(upstream, target_ref)
-        if not compatible:
-            raise RuntimeError(
-                f"Upstream ref '{target_ref}' in {upstream} is incompatible ({compat_reason})."
-            )
-
-        is_branch = target_ref in ("main", "master")
-        release_tag = "" if is_branch else target_ref
-        if publish_release and release_tag and not force_build and release_exists(repo, release_tag, token):
+    if event == "schedule":
+        if not force_build and release_exists(repo, release_tag, token):
             outputs = {
                 "should_build": "false",
-                "target_ref": target_ref,
-                "publish_release": "false",
+                "target_ref": effective_ref,
+                "commit_sha": commit_sha,
+                "short_sha": short_sha,
+                "fw_version": fw_version,
                 "release_tag": release_tag,
+                "publish_release": "false",
                 "force_build": "false",
             }
             return outputs, [
-                "### Manual Dispatch Skipped",
-                f"- Release `{release_tag}` already exists in `{repo}`.",
-                "- Re-run with `force_build=true` to rebuild and overwrite release assets.",
+                "### Weekly Upstream Main Check",
+                f"- Upstream `{upstream}@{effective_ref}` is at `{short_sha}` (`{commit_subject}`).",
+                f"- Release `{release_tag}` is already published in `{repo}`; no new upstream commits since last release. Skipping redundant build.",
             ]
 
         outputs = {
             "should_build": "true",
-            "target_ref": target_ref,
-            "publish_release": "true" if publish_release else "false",
+            "target_ref": effective_ref,
+            "commit_sha": commit_sha,
+            "short_sha": short_sha,
+            "fw_version": fw_version,
             "release_tag": release_tag,
+            "publish_release": "true",
             "force_build": "true" if force_build else "false",
         }
         return outputs, [
-            "### Manual Firmware Build",
-            f"- Upstream ref: `{upstream}@{target_ref}`",
-            f"- Publish GitHub Release: `{outputs['publish_release']}`",
-            f"- Force rebuild: `{outputs['force_build']}`",
+            "### Weekly Upstream Main Release Build",
+            f"- Upstream ref: `{upstream}@{effective_ref}` (`{short_sha}`, {commit_date or 'unknown date'})",
+            f"- Head commit: {commit_subject}",
+            f"- Target release tag: `{release_tag}` (Makefile `v{fw_version}`)",
+            "- Proceeding to compile, verify checksums, generate release notes, and publish release.",
         ]
 
-    # Automatic discovery mode (schedule or workflow_dispatch with blank/latest-release)
-    releases = get_upstream_releases(upstream)
-    checked_notes: list[str] = []
-    chosen_tag: str | None = None
-    chosen_title = ""
-
-    for tag, title, updated in releases:
-        compatible, compat_reason = is_ref_compatible(upstream, tag)
-        checked_notes.append(f"`{tag}` ({updated or 'unknown date'}): {compat_reason}")
-        if compatible:
-            chosen_tag = tag
-            chosen_title = title
-            break
-
-    if not chosen_tag:
+    # workflow_dispatch (or other manual/custom triggers)
+    if publish_release and not force_build and release_exists(repo, release_tag, token):
         outputs = {
             "should_build": "false",
-            "target_ref": "",
+            "target_ref": effective_ref,
+            "commit_sha": commit_sha,
+            "short_sha": short_sha,
+            "fw_version": fw_version,
+            "release_tag": release_tag,
             "publish_release": "false",
-            "release_tag": "",
-            "force_build": "false",
-        }
-        notes_md = "\n".join(f"  - {note}" for note in checked_notes) or "  - None found"
-        return outputs, [
-            "### Upstream Release Check",
-            f"- No compatible release found in `{upstream}` yet. Skipping scheduled build cleanly.",
-            "- Releases evaluated:\n" + notes_md,
-        ]
-
-    if not force_build and release_exists(repo, chosen_tag, token):
-        outputs = {
-            "should_build": "false",
-            "target_ref": chosen_tag,
-            "publish_release": "false",
-            "release_tag": chosen_tag,
             "force_build": "false",
         }
         return outputs, [
-            "### Upstream Release Check",
-            f"- Latest compatible upstream release `{chosen_tag}` (`{chosen_title}`) is already published in `{repo}`.",
-            "- Skipping redundant build.",
+            "### Manual Dispatch Skipped",
+            f"- Release `{release_tag}` already exists in `{repo}` (upstream `{upstream}@{effective_ref}` -> `{short_sha}`).",
+            "- Re-run with `force_build=true` to rebuild and overwrite release assets.",
         ]
 
     outputs = {
         "should_build": "true",
-        "target_ref": chosen_tag,
-        "publish_release": "true",
-        "release_tag": chosen_tag,
+        "target_ref": effective_ref,
+        "commit_sha": commit_sha,
+        "short_sha": short_sha,
+        "fw_version": fw_version,
+        "release_tag": release_tag,
+        "publish_release": "true" if publish_release else "false",
         "force_build": "true" if force_build else "false",
     }
     return outputs, [
-        "### New Compatible Upstream Release Detected",
-        f"- Upstream repository: `{upstream}`",
-        f"- Release tag: `{chosen_tag}` (`{chosen_title}`)",
-        "- Proceeding to compile, verify checksums, and publish release assets.",
+        "### Manual Firmware Build",
+        f"- Upstream ref: `{upstream}@{effective_ref}` (`{short_sha}`, {commit_date or 'unknown date'})",
+        f"- Head commit: {commit_subject}",
+        f"- Target release tag: `{release_tag}`",
+        f"- Publish GitHub Release: `{outputs['publish_release']}`",
+        f"- Force rebuild: `{outputs['force_build']}`",
     ]
 
 
@@ -249,6 +301,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--event", required=True)
     parser.add_argument("--target-ref", default="")
+    parser.add_argument("--upstream-branch", default="main")
     parser.add_argument("--publish-release", default="false")
     parser.add_argument("--force-build", default="false")
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
@@ -259,6 +312,7 @@ def main() -> int:
     outputs, summary = decide_build(
         event=args.event.strip(),
         target_ref=args.target_ref.strip(),
+        upstream_branch=args.upstream_branch.strip() or "main",
         publish_release=parse_bool(args.publish_release),
         force_build=parse_bool(args.force_build),
         repo=args.repo.strip(),
